@@ -24,7 +24,6 @@ class TestBaselineManager(unittest.TestCase):
 
     def test_create_baseline(self):
         result = create_baseline(self.file_path, self.db_path)
-
         expected = calculate_sha256(self.file_path)
 
         self.assertEqual(result, expected)
@@ -32,10 +31,14 @@ class TestBaselineManager(unittest.TestCase):
     def test_baseline_is_stored_in_database(self):
         create_baseline(self.file_path, self.db_path)
 
-        with sqlite3.connect(self.db_path) as connection:
+        connection = sqlite3.connect(self.db_path)
+
+        try:
             record = connection.execute(
                 "SELECT file_path, hash_value FROM baselines"
             ).fetchone()
+        finally:
+            connection.close()
 
         self.assertIsNotNone(record)
         self.assertEqual(record[0], str(self.file_path.resolve()))

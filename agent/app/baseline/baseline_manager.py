@@ -1,62 +1,110 @@
 
 import sqlite3
-import tempfile
-import unittest
 from pathlib import Path
+from datetime import datetime, timezone
 
-from app.baseline.baseline_manager import create_baseline
 from app.hashing.file_hasher import calculate_sha256
 
 
-class TestBaselineManager(unittest.TestCase):
+def initialize_baseline_store(db_path: str | Path) -> None:
+    """
+    Create the SQLite database and baseline table
+    if they do not already exist.
+    """
 
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.test_directory = Path(self.temp_dir.name)
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.db_path = self.test_directory / "fim_test.db"
-        self.file_path = self.test_directory / "sample.txt"
+    connection = sqlite3.connect(db_path)
 
-        self.file_path.write_text("FIM trusted content")
+    try:
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS baselines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL UNIQUE,
+                hash_value TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                modified_at TEXT NOT NULL,
+                baseline_version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+        """)
 
-    def tearDown(self):
-        self.temp_dir.cleanup()
+        connection.commit()
 
-    def test_create_baseline(self):
-        result = create_baseline(self.file_path, self.db_path)
-
-        expected = calculate_sha256(self.file_path)
-
-        self.assertEqual(result, expected)
-
-    def test_baseline_is_stored_in_database(self):
-        create_baseline(self.file_path, self.db_path)
-
-        connection = sqlite3.connect(self.db_path)
-
-        try:
-            record = connection.execute(
-                "SELECT file_path, hash_value FROM baselines"
-            ).fetchone()
-        finally:
-            connection.close()
-
-        self.assertIsNotNone(record)
-        self.assertEqual(record[0], str(self.file_path.resolve()))
-        self.assertEqual(record[1], calculate_sha256(self.file_path))
-
-    def test_duplicate_baseline_is_rejected(self):
-        create_baseline(self.file_path, self.db_path)
-
-        with self.assertRaises(sqlite3.IntegrityError):
-            create_baseline(self.file_path, self.db_path)
-
-    def test_missing_file_is_rejected(self):
-        missing_file = self.test_directory / "missing.txt"
-
-        with self.assertRaises(FileNotFoundError):
-            create_baseline(missing_file, self.db_path)
+    finally:
+        connection.close()
 
 
-if __name__ == "__main__":
-    unittest.main()
+def create_baseline(
+    file_path: str | Path,
+    db_path: str | Path
+) -> str:
+    """
+    Create a trusted SHA-256 baseline for a file.
+
+    Returns:
+        The SHA-256 hash of the file.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        sqlite3.IntegrityError: If a baseline already exists.
+    """
+
+    file_path = Path(file_path)
+
+    if not file_path.is_file():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    canonical_path = str(file_path.resolve())
+
+    # Calculate the file's SHA-256 hash.
+    file_hash = calculate_sha256(file_path)
+
+    # Collect file metadata.
+    file_stats = file_path.stat()
+
+    size_bytes = file_stats.st_size
+
+    modified_at = datetime.fromtimestamp(
+        file_stats.st_mtime,
+        timezone.utc
+    ).isoformat()
+
+    initialize_baseline_store(db_path)
+
+    connection = sqlite3.connect(db_path)
+
+    try:
+        connection.execute(
+            """
+            INSERT INTO baselines (
+                file_path,
+                hash_value,
+                size_bytes,
+                modified_at,
+                baseline_version,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                canonical_path,
+                file_hash,
+                size_bytes,
+                modified_at,
+                1,
+                datetime.now(timezone.utc).isoformat()
+            )
+        )
+
+        connection.commit()
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+    return file_hash
